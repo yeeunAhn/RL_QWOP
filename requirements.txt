@@ -1,0 +1,11 @@
+numpy
+opencv-python
+pytesseract
+Pillow
+mss
+selenium
+pynput
+gymnasium
+stable-baselines3
+torch
+tensorboard

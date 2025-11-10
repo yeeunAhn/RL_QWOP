@@ -1,22 +1,20 @@
-# QWOP Original Environment (Selenium + OCR) — CDP 키입력(동시 누름 지원)
+# QWOP Original Environment (Selenium + OCR) — CDP 키입력 + 창가려도 동작(브라우저 스크린샷 크롭)
 # gym과 분리된 native env
 
 from typing import Union, Tuple, Dict, Any, List
-import os, re, random
+import os, re, random, io
 import numpy as np
 import cv2
 import pytesseract
 from PIL import Image
 from time import sleep, time
-from mss import mss
+from collections import deque
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
-
-from collections import deque
 
 
 ACTIONS = {
@@ -53,9 +51,13 @@ class QWOPEnv:
 
         # 브라우저
         opts = webdriver.ChromeOptions()
-        # opts.add_argument("--headless=new")
+        # 창 가림/백그라운드에도 렌더링/스크린샷 가능하도록 옵션
+        if self.background_safe:
+            opts.add_argument("--headless=new")
+            # 헤드리스에서 스케일·안티앨리어싱 안정화
+            opts.add_argument("--force-device-scale-factor=1")
+            opts.add_argument("--high-dpi-support=1")
         opts.add_argument("--window-size=1000,1000")
-        # opts.add_argument("--window-position=3000,100")
         opts.add_argument("--disable-background-timer-throttling")
         opts.add_argument("--disable-renderer-backgrounding")
         opts.add_argument("--disable-backgrounding-occluded-windows")
@@ -63,11 +65,14 @@ class QWOPEnv:
         self.driver = webdriver.Chrome(options=opts)
         self.driver.get("http://0.0.0.0:8000/")
 
-        wait = WebDriverWait(self.driver, 10)
+        wait = WebDriverWait(self.driver, 15)
         game_obj = wait.until(EC.element_to_be_clickable((By.TAG_NAME, "ruffle-object")))
         self.game_elem = game_obj  # 포커스 대상 저장
         ActionChains(self.driver).click(on_element=self.game_elem).perform()
         sleep(0.5)
+
+        # devicePixelRatio
+        self.dpr = float(self.driver.execute_script("return window.devicePixelRatio || 1;"))
 
         # CDP 키맵
         self._KEYMAP: Dict[str, Dict[str, Any]] = {
@@ -85,22 +90,6 @@ class QWOPEnv:
         ActionChains(self.driver).click(on_element=self.game_elem).perform()
         sleep(0.5)
 
-        # mss 캡처 영역
-        # Selenium get_attribute("width"/"height")가 문자열일 수 있으니 int 변환
-        width = int(self.game_elem.get_attribute("width") or 800)
-        height = int(self.game_elem.get_attribute("height") or 600)
-        loc = self.game_elem.location
-        # 필요시 offset 조정
-        self.game_obj_location = {
-            "top": int(loc['y']) + 200,
-            "left": int(loc['x']) + 100,
-            "width": width,
-            "height": height,
-        }
-
-        # mss 재사용
-        self.sct = mss()
-
         # 상태 변수
         self.prev_dist = np.nan
         self._dist_before = np.nan
@@ -110,20 +99,19 @@ class QWOPEnv:
         self.step_timeout_sec = 12.0
         self.baseline_bright = 0.10
         self.nan_streak = 0
-        self.nan_done_streak = 50000000000  # 연속 5회 NaN이면 done (의도적으로 매우 큼)
+        self.nan_done_streak = 50000000000  # 의도적으로 큼
 
         # 주기/속도 파라미터
-        self.key_hold = 0.1      # 키 유지시간(초) 0.08~0.15 권장
-        self.dt = 1.0/30.0       # 스텝 주기(30Hz)
-        self.ocr_stride = 4      # 매 4스텝마다 한 번만 OCR
+        self.key_hold = 0.1      # 0.08~0.15 권장
+        self.dt = 1.0/30.0       # 30Hz
+        self.ocr_stride = 4      # 매 4스텝마다 OCR
         self.step_i = 0
 
-        # 관측 사이즈 축소(scale)
-        self.obs_scale = 0.25    # 관측 프레임 축소 비율(0.25 = 1/4)
+        # 관측 축소
+        self.obs_scale = 0.25
 
         self.save_dir = os.getcwd()
-
-        self.fall_penalty = 3.0
+        self.fall_penalty = 1.0
 
     # ====== Public API ======
     def reset(self) -> np.ndarray:
@@ -132,7 +120,6 @@ class QWOPEnv:
         frames = self._capture_frames_raw(self.frame_stack, force_ocr=True)
         for frame in frames:
             self.frame_buffer.append(frame)
-
         obs = np.stack(list(self.frame_buffer), axis=0)
         self.step_i = 0
         self.nan_streak = 0
@@ -143,13 +130,13 @@ class QWOPEnv:
         keys = ACTIONS.get(action, [])
 
         if keys:
-            self._press_combo(keys)  # 동시 누름: 모두 down → 대기 → 모두 up
+            self._press_combo(keys)  # 동시 누름
         else:
             sleep(self.key_hold)     # no-op
 
         do_ocr = (self.step_i % self.ocr_stride == 0)
 
-        # 새 프레임만 캡처
+        # 새 프레임 캡처
         new_frame_list = self._capture_frames_raw(1, force_ocr=do_ocr)
         new_frame = new_frame_list[0]
 
@@ -206,9 +193,8 @@ class QWOPEnv:
         })
 
     def _press_combo(self, keys: List[str]):
-        # 포커스 보장
+        # 포커스 보장(헤드리스에서도 무해)
         ActionChains(self.driver).click(on_element=self.game_elem).perform()
-        # 동시 누름
         for k in keys:
             self._cdp_key_down(k)
         sleep(self.key_hold)
@@ -226,10 +212,9 @@ class QWOPEnv:
             self._cdp_key_down(' '); self._cdp_key_up(' ')
             sleep(0.3)
             # 시작 감지(팝업 사라짐 또는 거리 읽힘)
-            raw = self.sct.grab(self.game_obj_location)
-            arr_full = np.asarray(raw)[:, :, 0]
-            if not self._is_restart_popup(arr_full):
-                d = self._try_ocr_once(arr_full)
+            gray_full = self._grab_elem_gray()  # 창 가려도 안전
+            if not self._is_restart_popup(gray_full):
+                d = self._try_ocr_once(gray_full)
                 if not np.isnan(d):
                     break
 
@@ -246,16 +231,64 @@ class QWOPEnv:
             self.nan_streak = 0
         return self.nan_streak >= self.nan_done_streak
 
+    # ---------- 화면 캡처(창 가려도 동작) ----------
+    def _get_elem_rect_css(self) -> Dict[str, float]:
+        # getBoundingClientRect는 CSS pixel 단위
+        rect = self.driver.execute_script("""
+            const el = arguments[0];
+            const r = el.getBoundingClientRect();
+            return {x: r.x, y: r.y, w: r.width, h: r.height, sx: window.scrollX, sy: window.scrollY};
+        """, self.game_elem)
+        return rect  # keys: x,y,w,h,sx,sy
+
+    def _grab_elem_gray(self) -> np.ndarray:
+        """
+        브라우저 전체 스크린샷 → DPR 고려해 요소 영역 크롭 → GRAY 반환
+        창이 가려져도 문제없음(브라우저 비트맵 캡처).
+        """
+        # 스크롤 위치/요소 위치
+        rect = self._get_elem_rect_css()
+        x_css = float(rect["x"]) + float(rect["sx"])
+        y_css = float(rect["y"]) + float(rect["sy"])
+        w_css = float(rect["w"])
+        h_css = float(rect["h"])
+
+        # DPR 반영한 비트맵 좌표
+        x = int(round(x_css * self.dpr))
+        y = int(round(y_css * self.dpr))
+        w = int(round(w_css * self.dpr))
+        h = int(round(h_css * self.dpr))
+
+        # 브라우저 비트맵
+        png = self.driver.get_screenshot_as_png()
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+        full = np.array(img)  # HxWx3 RGB
+
+        # 안전한 범위 클램프
+        H, W, _ = full.shape
+        x2 = min(W, max(0, x + w))
+        y2 = min(H, max(0, y + h))
+        x1 = min(W, max(0, x))
+        y1 = min(H, max(0, y))
+        if x2 <= x1 or y2 <= y1:
+            # 비정상일 경우 전체로 fallback
+            crop = full
+        else:
+            crop = full[y1:y2, x1:x2, :]
+
+        # GRAY (BGR 필요 없고 OCR/관측 동일하게 단일 채널 사용)
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        return gray
+
     def _capture_frames_raw(self, n: int, force_ocr: bool=False) -> np.ndarray:
-        """관측 프레임은 축소본으로 리턴. OCR은 항상 원본(arr_full)에서만 수행."""
+        """관측 프레임은 축소본으로 리턴. OCR은 항상 원본(gray_full)에서만 수행."""
         frames = []
         for _ in range(n):
-            raw = self.sct.grab(self.game_obj_location)       # BGRA
-            arr_full = np.asarray(raw)[:, :, 0]               # 원본 1채널(B)
+            gray_full = self._grab_elem_gray()
 
             # 관측은 축소본으로
             arr_obs = cv2.resize(
-                arr_full, (0, 0),
+                gray_full, (0, 0),
                 fx=self.obs_scale, fy=self.obs_scale,
                 interpolation=cv2.INTER_AREA
             )
@@ -263,7 +296,7 @@ class QWOPEnv:
 
             # OCR → prev_dist 갱신 및 improve 타이머 갱신 (필요시에만)
             if force_ocr:
-                dist = self._ocr_distance(arr_full)
+                dist = self._ocr_distance(gray_full)
                 if self.debug_ocr:
                     print(f"[OCR] distance: {dist} metres")
 
@@ -382,7 +415,7 @@ class QWOPEnv:
 
 # ----------------- quick test -----------------
 if __name__ == '__main__':
-    env = QWOPEnv(debug_ocr=False)
+    env = QWOPEnv(debug_ocr=False, frame_stack=1, background_safe=False) # True시 창 안뜸
     try:
         ep = 0
         while True:

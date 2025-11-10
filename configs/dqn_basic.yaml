@@ -1,0 +1,15 @@
+# 최초 기본 설정
+
+frame_stack: 4
+lr: 1.0e-4
+buffer_size: 50000
+learning_starts: 2000
+batch_size: 64
+tau: 0.005
+gamma: 0.995
+train_freq: 4
+gradient_steps: 16
+target_update_interval: 2000
+save_freq: 10000
+eval_freq: 10000
+total_timesteps: 300000

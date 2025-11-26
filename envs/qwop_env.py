@@ -9,6 +9,8 @@ import pytesseract
 from PIL import Image
 from time import sleep, time
 from mss import mss
+import re
+
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -24,12 +26,12 @@ ACTIONS = {
     2: ['w'],
     3: ['o'],
     4: ['p'],
-    5: ['q', 'w'],
+    #5: ['q', 'w'],
     6: ['q', 'o'],
     7: ['q', 'p'],
     8: ['w', 'o'],
     9: ['w', 'p'],
-    10: ['o', 'p'],
+    #10: ['o', 'p'],
     # 11: ['q','w','o'],
     # 12: ['q','w','p'],
     # 13: ['q','o','p'],
@@ -110,20 +112,20 @@ class QWOPEnv:
         self._dist_before = np.nan
         self.last_improve_time = time()
         self.episode_start_time = time()
-        self.idle_done_sec = 20.0
+        self.idle_done_sec = 15.0
         self.step_timeout_sec = 100.0
         self.baseline_bright = 0.10
         self.nan_streak = 0
         self.nan_done_streak = 50000000000  # 연속 5회 NaN이면 done (의도적으로 매우 큼)
 
         # 주기/속도 파라미터
-        self.key_hold = 0.04  # 키 유지시간(초) 0.08~0.15 권장
+        self.key_hold = 0.08  # 키 유지시간(초) 0.08~0.15 권장
         self.dt = 1.0 / 30.0  # 스텝 주기(30Hz)
         self.ocr_stride = 6  # 매 6스텝마다 한 번만 OCR
         self.step_i = 0
 
         # 관측 사이즈 축소(scale)
-        self.obs_scale = 0.25  # 관측 프레임 축소 비율(0.25 = 1/4)
+        self.obs_scale = 0.15 # 관측 프레임 축소 비율(0.25 = 1/4)
 
         self.save_dir = os.getcwd()
 
@@ -158,6 +160,10 @@ class QWOPEnv:
         obs = np.stack(list(self.frame_buffer), axis=0)
         self.step_i = 0
         self.nan_streak = 0
+
+        # ⭐️ [추가] 이번 에피소드의 최고 도달 거리 (0부터 시작)
+        self.max_dist_episode = 0.0
+
         return obs
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
@@ -178,77 +184,105 @@ class QWOPEnv:
         obs = np.stack(list(self.frame_buffer), axis=0)
 
         # ==========================================================
-        # 💡 [수정] 보상 로직 (최종 거리 보상으로 변경)
+        # 💡 [업그레이드된 보상 로직]
         # ==========================================================
 
-        # 1. [유지] 스텝별 보상: 자세 보상 + 생존 페널티
+        # 1. 자세 보상 계산
         posture_reward = self._calculate_posture_reward(last_full_frame)
-        curr_dist = self.prev_dist  # (로그 및 최종 거리 계산용)
+        curr_dist = self.prev_dist
 
-        LIVING_PENALTY = 0.01
+        # 2. [수정] 생존 페널티 강화 (0.01 -> 0.05)
+        #    이제 자세(0.1)만 잡고 안 움직이면 +0.05 밖에 못 법니다.
+        #    빨리 앞으로 가서 거리 보상을 먹어야 이득이 커집니다.
+        LIVING_PENALTY = 0.02
         reward = posture_reward - LIVING_PENALTY
 
-        # 2. [제거] '스텝별' 거리 보상 로직 ('distance_change')을 완전히 제거합니다.
-        #    에이전트는 이제 '과정'이 아닌 '결과'로 보상받습니다.
+        # 3. [추가] 최고 기록 갱신 보상 (Max Distance Reward)
+        #    와리가리는 무시하고, "새로운 땅"을 밟을 때만 보상!
+        STEP_REWARD_SCALE = 4.0  # (가중치)
+
+        if not np.isnan(curr_dist):
+            # 만약 이번 스텝의 거리가 '지금까지의 최고 기록'보다 크다면?
+            if curr_dist > self.max_dist_episode:
+                diff = curr_dist - self.max_dist_episode
+
+                # 갱신한 만큼 보상 지급 (0.1m 갱신하면 +0.5점)
+                reward += diff * STEP_REWARD_SCALE
+
+                # 최고 기록 업데이트
+                self.max_dist_episode = curr_dist
+
+        # step() 안에서 curr_dist 계산 후, reward 계산 부분 바로 아래에 추가
+
+        STEP_PROGRESS_SCALE = 3.0  # 새로 추가 (5보다 작게 시작 추천)
+
+        dist_progress = 0.0
+        if not np.isnan(curr_dist) and not np.isnan(self._dist_before):
+            dist_progress = curr_dist - self._dist_before
+            if dist_progress > 0:
+                reward += dist_progress * STEP_PROGRESS_SCALE
+
+        self._dist_before = curr_dist
 
         # ==========================================================
-        # 💡 [수정] 끝
-        # ==========================================================
 
-        # 1. done 판정 (팝업 또는 NaN)
+        # 1. done 판정
         done = self._nan_done(curr_dist) or self._done_check(last_full_frame)
-        final_dist_for_info = curr_dist  # (일단 현재 거리로 초기화)
+        final_dist_for_info = curr_dist
 
-        # 💡 [핵심] "림보왕" 버그를 잡기 위한 시간 초과 로직 (원본 유지)
-        # (이 로직은 _ocr_distance 내부의 'self.last_improve_time' 갱신을 기반으로
-        #  정상 동작하므로 수정할 필요가 없습니다.)
+        # 1. 경과 시간 계산
         time_since_improve = time() - self.last_improve_time
         time_since_start = time() - self.episode_start_time
 
-        if not done and (time_since_improve > self.idle_done_sec or time_since_start > self.step_timeout_sec):
-            print(
-                f"[Env] Done due to timeout (Limbo King?). Idle: {time_since_improve:.1f}s / Total: {time_since_start:.1f}s")
-            done = True
-            # 시간 초과도 '넘어진 것'과 동일하게 취급
+        # 2. 동적 제한 시간 계산
+        # 기본 20초 + (현재 거리 * 15초)
+        # 예: 0m -> 20초 제한
+        # 예: 2m -> 20 + 30 = 50초 제한
+        # 예: 10m -> 20 + 150 = 170초 제한
+        current_dist_val = curr_dist if not np.isnan(curr_dist) else 0.0
+        dynamic_time_limit = 20.0 + (max(0, current_dist_val) * 15.0)
 
-        # 3. 최종 done 처리
+        # 3. Done 판정
+        # (조건 A) 오랫동안 제자리걸음(idle) 이거나
+        # (조건 B) 거리에 비해 시간이 너무 많이 지났으면(dynamic_limit) 종료
+        if not done:
+            if time_since_improve > self.idle_done_sec:
+                print(f"[Env] Done: Idle for {time_since_improve:.1f}s (No progress)")
+                done = True
+
+            elif time_since_start > dynamic_time_limit:
+                print(
+                    f"[Env] Done: Time Over! ({time_since_start:.1f}s > Limit {dynamic_time_limit:.1f}s for {current_dist_val:.2f}m)")
+                done = True
+
         if done:
-            # (넘어짐, NaN, *시간 초과* 모두 여기서 페널티를 받음)
             reward -= self.fall_penalty
 
-            # '넘어진' 경우, 더 정확한 최종 스코어를 위해 OCR 강제 스캔
-            if self._is_restart_popup(last_full_frame):
-                print("[Env] Fall detected. Forcing final OCR scan for accurate score...")
-                # _ocr_distance는 self.prev_dist를 갱신함
-                final_score = self._ocr_distance(last_full_frame)
-                if not np.isnan(final_score):
-                    final_dist_for_info = final_score  # 최종 스코어 갱신
+            sleep(0.2)
+            raw_last = self.sct.grab(self.game_obj_location)
+            gray_last = np.asarray(raw_last)[:, :, 0]
 
-            # [수정] 3. '최종 거리'에 대한 보상을 '여기서' 한 번에 지급
-            # (이 값이 매우 중요합니다. 10.0 ~ 20.0 사이 값을 추천)
-            FINAL_DISTANCE_REWARD_SCALE = 15.0
+            # 이 gray_last 기준으로 최종 점수 읽기
+            final_score = self._try_ocr_once(gray_last)
+            if not np.isnan(final_score):
+                final_dist_for_info = final_score
 
+            FINAL_DISTANCE_REWARD_SCALE = 10.0
             final_dist_reward = 0.0
             if not np.isnan(final_dist_for_info):
-                # 최종 거리가 마이너스면 페널티, 플러스면 큰 보상
                 final_dist_reward = final_dist_for_info * FINAL_DISTANCE_REWARD_SCALE
 
             reward += final_dist_reward
-
-            # (로그 추가)
             print(f"[Env] Final dist reward: {final_dist_reward:.3f} (dist: {final_dist_for_info:.2f})")
 
-        # 최종 info 딕셔너리
+            if self._is_restart_popup(gray_last):
+                print("[Env] Restart popup detected at end of episode.")
+
         info = {
             "distance": float(final_dist_for_info) if not np.isnan(final_dist_for_info) else float("nan"),
             "posture_reward": posture_reward
         }
         self.step_i += 1
-
-        # 스텝 주기 맞추기
-        remain = self.dt - (time() - t0)
-        if remain > 0:
-            sleep(remain)
 
         return obs, reward, done, info
 

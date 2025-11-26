@@ -198,8 +198,8 @@ class EvaluationAgent:
 # 3. 실행 블록
 # ----------------------------------------------------
 if __name__ == '__main__':
-    MODEL_FILE = "checkpoints/qwop_completed_20251119_234034_steps28176.pth"
-    FRAME_STACK = 4
+    MODEL_FILE = "checkpoints/qwop_checkpoint_20251125_175634_steps170000.pth"
+    FRAME_STACK = 2
     NUM_EVAL_EPISODES = 10
 
     # 1. 환경 초기화

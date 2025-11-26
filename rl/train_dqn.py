@@ -68,10 +68,9 @@ class QWOP_QNetwork(nn.Module):
 
 
 # ----------------------------------------------------
-# 2. 경험 재생 버퍼 (Replay Buffer)
+# 2. 경험 재생 버퍼 (Replay Buffer) - 메모리 최적화 버전
 # ----------------------------------------------------
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
-
 
 class ReplayBuffer:
     def __init__(self, capacity):
@@ -79,18 +78,24 @@ class ReplayBuffer:
 
     def push(self, state, action, reward, next_state, done):
         """새로운 경험을 버퍼에 저장합니다."""
-        self.buffer.append(Transition(state, action, reward, next_state, done))
+        self.buffer.append(Transition(
+            torch.from_numpy(state).to(torch.uint8),
+            action,
+            reward,
+            torch.from_numpy(next_state).to(torch.uint8),
+            done
+        ))
 
     def sample(self, batch_size, device):
         """버퍼에서 무작위로 배치 크기만큼의 경험을 샘플링합니다."""
         experiences = random.sample(self.buffer, batch_size)
 
-        states = torch.tensor(np.array([e.state for e in experiences]), dtype=torch.float, device=device)
+        # ⭐️ [최적화] 꺼낼 때 다시 float32로 변환
         actions = torch.tensor(np.array([e.action for e in experiences]), dtype=torch.long, device=device).unsqueeze(-1)
-        rewards = torch.tensor(np.array([e.reward for e in experiences]), dtype=torch.float, device=device).unsqueeze(
-            -1)
-        next_states = torch.tensor(np.array([e.next_state for e in experiences]), dtype=torch.float, device=device)
-        dones = torch.tensor(np.array([e.done for e in experiences]), dtype=torch.float, device=device).unsqueeze(-1)
+        rewards = torch.tensor(np.array([e.reward for e in experiences]), dtype=torch.float32, device=device).unsqueeze(-1)
+        dones = torch.tensor(np.array([e.done for e in experiences]), dtype=torch.float32, device=device).unsqueeze(-1)
+        states = torch.stack([e.state for e in experiences]).float().to(device)
+        next_states = torch.stack([e.next_state for e in experiences]).float().to(device)
 
         return states, actions, rewards, next_states, dones
 
@@ -113,10 +118,10 @@ class DQNAgent:
         self.LR = kwargs.get('lr', 1e-4)
         self.BATCH_SIZE = kwargs.get('batch_size', 32)
         self.TARGET_UPDATE = kwargs.get('target_update', 1000)  # 타겟 네트워크 업데이트 주기
-        self.EPSILON_START = kwargs.get('eps_start', 1.0)
+        self.EPSILON_START = kwargs.get('eps_start', 0.20)
         self.EPSILON_END = kwargs.get('eps_end', 0.01)
         self.EPSILON_DECAY = kwargs.get('eps_decay', 50000)
-        self.REPLAY_CAPACITY = kwargs.get('replay_capacity', 50000)
+        self.REPLAY_CAPACITY = kwargs.get('replay_capacity', 30000)
         self.MIN_REPLAY_SIZE = kwargs.get('min_replay_size', 5000)
 
         # 네트워크 및 버퍼 초기화
@@ -129,6 +134,10 @@ class DQNAgent:
         self.memory = ReplayBuffer(self.REPLAY_CAPACITY)
         self.step_count = 0
         self.current_epsilon = self.EPSILON_START  # 💡 초기화
+
+        # 최고 모델 경로 설정
+        self.best_model_path = os.path.join(project_root, "checkpoints", "best_model.pth")
+        self.best_distance = -float("inf")  # 초기 최고 성능은 매우 낮게 설정
 
     def select_action(self, state):
         """Epsilon-Greedy 정책에 따라 행동을 선택합니다."""
@@ -156,10 +165,15 @@ class DQNAgent:
         current_q = self.policy_net(states).gather(1, actions)
 
         # 2. 타겟 Q 값 $R + \gamma \cdot \max_{a'} Q_{target}(s', a')$ 계산
+        # 2. 타겟 Q 값 계산 (DDQN 방식 - 더블 체크)
         with torch.no_grad():
-            next_q_target = self.target_net(next_states).max(1)[0].unsqueeze(1)
-            target_q = rewards + (1 - dones) * self.GAMMA * next_q_target
+            # (1) 행동 선택은 Policy Net(학생)이 함
+            next_actions = self.policy_net(next_states).argmax(1).unsqueeze(1)
 
+            # (2) 점수 채점은 Target Net(선생님)이 함
+            next_q_target = self.target_net(next_states).gather(1, next_actions)
+
+            target_q = rewards + (1 - dones) * self.GAMMA * next_q_target
         # Huber Loss를 사용하여 손실 계산
         loss = nn.functional.smooth_l1_loss(current_q, target_q)
 
@@ -169,11 +183,26 @@ class DQNAgent:
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 1.0)
         self.optimizer.step()
 
+        return loss.item()
+
+
     def update_target_network(self):
         """일정 주기로 타겟 네트워크를 정책 네트워크로 업데이트합니다."""
         if self.step_count % self.TARGET_UPDATE == 0:
             print(f"--- Step {self.step_count}: 타겟 네트워크 업데이트 ---")
             self.target_net.load_state_dict(self.policy_net.state_dict())
+
+    def save_best_model(self, current_distance):
+        """최고 모델을 저장합니다."""
+        if current_distance > self.best_distance:
+            self.best_distance = current_distance
+            # 파일명에 거리를 포함하여 저장
+            best_model_filename = f"best_model_{current_distance:.2f}m.pth"
+            best_model_path = os.path.join(project_root, "checkpoints", best_model_filename)
+
+            torch.save(self.policy_net.state_dict(), best_model_path)
+            print(f"✅ 최고 모델 저장 완료: {best_model_path} | Distance: {current_distance:.2f}m")
+
 
     # 💡 [수정] train 함수에 자동 저장을 위한 인자 추가
     def train(self, num_episodes, checkpoint_dir, checkpoint_interval=5000):
@@ -187,6 +216,7 @@ class DQNAgent:
             episode_start = time()
             episode_reward = 0.0
             episode_steps = 0
+            episode_loss = 0.0
 
             while True:
                 # 1. 행동 선택
@@ -204,15 +234,27 @@ class DQNAgent:
                 self.step_count += 1
                 episode_steps += 1
 
-                # 5. 학습 (버퍼가 찼을 때만)
-                self.learn()
+                # 🔥 일정 스텝마다 환경 재시작하여 Chrome/Ruffle 누수 방지
+                if self.step_count % 5000 == 0:
+                    print("[Env] Restarting Chrome/QWOP to avoid memory leak...")
+                    try:
+                        self.env.close()
+                    except:
+                        pass
+                    new_env = QWOPEnv(debug_ocr=False, frame_stack=FRAME_STACK, background_safe=True)
+                    self.env = new_env
+                    state = self.env.reset()
+
+                loss = self.learn()  # 학습을 하고 로스를 얻습니다.
+                if loss is not None:
+                    episode_loss += loss  # 에피소드 동안 손실 값 누적
 
                 # 6. 타겟 네트워크 업데이트 (일정 주기마다)
                 self.update_target_network()
                 import time as t
                 t.sleep(0.001)
 
-                # 💡 [수정] 5000 스텝마다 중간 저장 로직
+                # 💡 [수정] 스텝마다 중간 저장 로직
                 current_checkpoint_step = (self.step_count // checkpoint_interval) * checkpoint_interval
                 if current_checkpoint_step > last_checkpoint_step:
                     last_checkpoint_step = current_checkpoint_step  # 마지막 저장 지점 갱신
@@ -234,8 +276,12 @@ class DQNAgent:
                         f"Ep: {episode:04d} | Total Steps: {self.step_count} "
                         f"| Ep Reward: {episode_reward:.2f} | Ep Steps: {episode_steps} "
                         f"| Distance: {dist_str} | Epsilon: {self.current_epsilon:.3f} "
-                        f"| Time: {time() - episode_start:.1f}s"
+                        f"| Episode Loss: {episode_loss:.4f} | Time: {time() - episode_start:.1f}s"
+
                     )
+
+                    # 최고 모델 저장
+                    self.save_best_model(dist)
                     break
 
         print("DQN 학습 완료.")
@@ -273,7 +319,7 @@ if __name__ == '__main__':
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # QWOP 환경 초기화 (frame_stack = 4 권장)
-    FRAME_STACK = 4
+    FRAME_STACK = 2
     env = QWOPEnv(debug_ocr=False, frame_stack=FRAME_STACK, background_safe=True)
 
     initial_obs = env.reset()
@@ -290,18 +336,17 @@ if __name__ == '__main__':
         lr=1e-4,  # 학습률
         gamma=0.99,  # 할인 계수
         batch_size=32,  # 배치 크기
-        target_update=2000,  # 타겟 업데이트 주기 (스텝 기준)
-        eps_decay=40000,  # Epsilon 감소 속도 (더 느리게)
-        replay_capacity=20000,  # 리플레이 버퍼 크기
-        min_replay_size=5000  # 최소 학습 시작 크기
+        target_update=5000,  # 타겟 업데이트 주기 (스텝 기준)
+        eps_decay=120000,  # Epsilon 감소 속도 (더 느리게)
+        replay_capacity=30000,  # 리플레이 버퍼 크기
+        min_replay_size=2000  # 최소 학습 시작 크기
     )
 
     # 💡 [수정] 모델 로드 로직 (이어하기 원할 때 사용)
     # -------------------------------------------------------------------
-    # ⭐️ True로 바꾸고 아래 2줄 수정하면 이어하기
-    LOAD_MODEL = False
-    LOAD_STEP = 10000
-    MODEL_TO_LOAD = "checkpoints/qwop_checkpoint_20251119_160841_steps10000.pth"  # ⭐️ 이어할 파일명
+    LOAD_MODEL = True
+    LOAD_STEP = 300000
+    MODEL_TO_LOAD = "checkpoints/qwop_checkpoint_20251126_121219_steps300000.pth"  # ⭐️ 이어할 파일명
 
     if LOAD_MODEL and agent.load_model(MODEL_TO_LOAD):
         agent.step_count = LOAD_STEP
@@ -319,16 +364,15 @@ if __name__ == '__main__':
     print(f"모델 저장 경로: {CHECKPOINT_DIR}")
 
     try:
-        # 💡 [수정] train 함수에 자동 저장 경로와 간격(5000) 전달
         agent.train(num_episodes=5000,  # (넉넉하게)
                     checkpoint_dir=CHECKPOINT_DIR,
                     checkpoint_interval=5000)  # ⭐️ 5000 스텝마다 저장
 
-        # 모든 학습이 완료된 eps_decay=100000후, 타임스탬프가 포함된 파일명으로 저장합니다.
+        # 모든 학습이 완료된 후, 타임스탬프가 포함된 파일명으로 저장합니다.
         print("\n[학습 완료] 모든 에피소드 학습 완료. 최종 모델을 저장합니다.")
         timestamp = time()
         timestamp_str = time_module.strftime("%Y%m%d_%H%M%S", time_module.localtime(timestamp))
-        filename = f"qwop_completed_{timestamp_str}_steps{agent.step_count}.pth"
+        filename = f"qwop_DDQN_completed_{timestamp_str}_steps{agent.step_count}.pth"
         agent.save_model(os.path.join(CHECKPOINT_DIR, filename))
         print(f"\n✅ 전체 학습 완료! 모델이 {filename} 에 저장되었습니다.")
 
@@ -336,7 +380,7 @@ if __name__ == '__main__':
         # Ctrl+C 감지 시 실행
         timestamp = time()
         timestamp_str = time_module.strftime("%Y%m%d_%H%M%S", time_module.localtime(timestamp))
-        filename = f"qwop_interrupted_{timestamp_str}_steps{agent.step_count}.pth"
+        filename = f"qwop_DDQN_interrupted_{timestamp_str}_steps{agent.step_count}.pth"
         print(f"\n[Ctrl+C 감지] 학습 중단 요청. 모델을 {filename}에 저장합니다.")
         agent.save_model(os.path.join(CHECKPOINT_DIR, filename))
 
@@ -345,16 +389,14 @@ if __name__ == '__main__':
         # 오류 발생 시에도 저장을 시도합니다.
         timestamp = time()
         timestamp_str = time_module.strftime("%Y%m%d_%H%M%S", time_module.localtime(timestamp))
-        filename = f"qwop_error_{timestamp_str}_steps{agent.step_count}.pth"
+        filename = f"qwop_DDQN_error_{timestamp_str}_steps{agent.step_count}.pth"
         print(f"오류 발생 전 모델을 {filename}에 저장합니다.")
         agent.save_model(os.path.join(CHECKPOINT_DIR, filename))
-        # ⭐️ 오류 스택 트레이스를 출력하여 디버깅 돕기
+        # 오류 스택 트레이스를 출력하여 디버깅 돕기
         import traceback
 
         traceback.print_exc()
 
-
     finally:
-        # 환경 종료 (정상 종료, Ctrl+C 종료, 오류 종료 모두 실행됨)
-        if hasattr(env, 'close'):
-            env.close()
+        if hasattr(agent, "env") and hasattr(agent.env, "close"):
+            agent.env.close()

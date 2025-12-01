@@ -198,7 +198,7 @@ class EvaluationAgent:
 # 3. 실행 블록
 # ----------------------------------------------------
 if __name__ == '__main__':
-    MODEL_FILE = "checkpoints/qwop_checkpoint_20251125_175634_steps170000.pth"
+    MODEL_FILE = "checkpoints/ver2/best_model_14.20m.pth"
     FRAME_STACK = 2
     NUM_EVAL_EPISODES = 10
 

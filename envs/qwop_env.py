@@ -40,10 +40,15 @@ ACTIONS = {
 }
 
 
+
 class QWOPEnv:
     # 상단 거리 텍스트 ROI (OCR용) - 비율
     ROI_Y0, ROI_Y1 = 0.07, 0.20
     ROI_X0, ROI_X1 = 0.30, 0.70
+
+    # 발 부분의 ROI를 추가 (발 부분 추적을 위한 비율 설정)
+    FOOT_ROI_Y0, FOOT_ROI_Y1 = 0.68, 0.90  # 발 위치 추정
+    FOOT_ROI_X0, FOOT_ROI_X1 = 0.10, 0.90  # 발이 화면에 위치하는 범위
 
     def __init__(self, debug_ocr: bool = False, frame_stack: int = 1, background_safe: bool = True,
                  debug_posture: bool = False):
@@ -112,14 +117,16 @@ class QWOPEnv:
         self._dist_before = np.nan
         self.last_improve_time = time()
         self.episode_start_time = time()
-        self.idle_done_sec = 15.0
+        self.idle_done_sec = 30.0 #수정예정
         self.step_timeout_sec = 100.0
         self.baseline_bright = 0.10
         self.nan_streak = 0
         self.nan_done_streak = 50000000000  # 연속 5회 NaN이면 done (의도적으로 매우 큼)
 
+
+
         # 주기/속도 파라미터
-        self.key_hold = 0.08  # 키 유지시간(초) 0.08~0.15 권장
+        self.key_hold = 0.15  # 키 유지시간(초) 0.08~0.15 권장
         self.dt = 1.0 / 30.0  # 스텝 주기(30Hz)
         self.ocr_stride = 6  # 매 6스텝마다 한 번만 OCR
         self.step_i = 0
@@ -137,6 +144,10 @@ class QWOPEnv:
         self.posture_roi_x = (0.25, 0.75)  # X (25% ~ 75%) - 캐릭터 중앙
         self.singlet_threshold = 210  # 흰색 싱레트 밝기 임계값 (튜닝 필요)
         self.ground_y_ratio = 0.68  # '땅'으로 간주할 Y 비율 (68%)
+
+        # 신발 x축 위치를 추적하는 변수 (이전과 현재)
+        self.prev_shoes_x_positions = []
+        self.reward_log = []  # 보상 로그를 저장할 리스트
 
         # 디버그 창 초기화
         if self.debug_posture:
@@ -177,6 +188,7 @@ class QWOPEnv:
 
         do_ocr = (self.step_i % self.ocr_stride == 0)
 
+        self.current_step_foot_reward = 0.0  # 초기화
         new_frame_stack, last_full_frame = self._capture_frames_raw(1, force_ocr=do_ocr)
         new_frame = new_frame_stack[0]
 
@@ -192,10 +204,13 @@ class QWOPEnv:
         curr_dist = self.prev_dist
 
         # 2. [수정] 생존 페널티 강화 (0.01 -> 0.05)
-        #    이제 자세(0.1)만 잡고 안 움직이면 +0.05 밖에 못 법니다.
-        #    빨리 앞으로 가서 거리 보상을 먹어야 이득이 커집니다.
+        # 2. 발 교차 보상 (저장해둔 값 가져오기) ⭐️
+        crossing_reward = self.current_step_foot_reward
+
+        # 3. 보상 합산
         LIVING_PENALTY = 0.02
-        reward = posture_reward - LIVING_PENALTY
+        reward = posture_reward + crossing_reward - LIVING_PENALTY
+
 
         # 3. [추가] 최고 기록 갱신 보상 (Max Distance Reward)
         #    와리가리는 무시하고, "새로운 땅"을 밟을 때만 보상!
@@ -227,6 +242,7 @@ class QWOPEnv:
         # ==========================================================
 
         # 1. done 판정
+        sleep(0.3)
         done = self._nan_done(curr_dist) or self._done_check(last_full_frame)
         final_dist_for_info = curr_dist
 
@@ -240,7 +256,7 @@ class QWOPEnv:
         # 예: 2m -> 20 + 30 = 50초 제한
         # 예: 10m -> 20 + 150 = 170초 제한
         current_dist_val = curr_dist if not np.isnan(curr_dist) else 0.0
-        dynamic_time_limit = 20.0 + (max(0, current_dist_val) * 15.0)
+        dynamic_time_limit = 2000.0 + (max(0, current_dist_val) * 15.0) #수정예정
 
         # 3. Done 판정
         # (조건 A) 오랫동안 제자리걸음(idle) 이거나
@@ -258,14 +274,22 @@ class QWOPEnv:
         if done:
             reward -= self.fall_penalty
 
-            sleep(0.2)
+            sleep(0.3)
             raw_last = self.sct.grab(self.game_obj_location)
             gray_last = np.asarray(raw_last)[:, :, 0]
 
             # 이 gray_last 기준으로 최종 점수 읽기
             final_score = self._try_ocr_once(gray_last)
-            if not np.isnan(final_score):
+            if np.isnan(curr_dist) and not np.isnan(final_score):
+                # 평소 거리를 전혀 못 읽던 상황이라면, 종료창 값 그대로 사용
                 final_dist_for_info = final_score
+            elif not np.isnan(curr_dist) and not np.isnan(final_score):
+                # 둘 다 숫자면, 거리가 줄어드는 건 말이 안 되니까
+                # 🔥 둘 중 더 큰 값만 사용
+                final_dist_for_info = max(curr_dist, final_score)
+            else:
+                # final_score가 NaN이면 그냥 기존 curr_dist 유지
+                final_dist_for_info = curr_dist
 
             FINAL_DISTANCE_REWARD_SCALE = 10.0
             final_dist_reward = 0.0
@@ -277,6 +301,8 @@ class QWOPEnv:
 
             if self._is_restart_popup(gray_last):
                 print("[Env] Restart popup detected at end of episode.")
+
+                sleep(0.3)
 
         info = {
             "distance": float(final_dist_for_info) if not np.isnan(final_dist_for_info) else float("nan"),
@@ -393,35 +419,141 @@ class QWOPEnv:
             self.nan_streak = 0
         return self.nan_streak >= self.nan_done_streak
 
+    def _capture_foot_area(self, current_posture_reward: float) -> Tuple[np.ndarray, float]:
+        """
+        발 영역 캡처 및 '서서 걷기' 유도 보상 (Identity Tracking 포함)
+        """
+        raw = self.sct.grab(self.game_obj_location)
+        gray_full = np.asarray(raw)[:, :, 0]
+
+        h, w = gray_full.shape[:2]
+        y0, y1 = int(h * self.FOOT_ROI_Y0), int(h * self.FOOT_ROI_Y1)
+        x0, x1 = int(w * self.FOOT_ROI_X0), int(w * self.FOOT_ROI_X1)
+        foot_roi = gray_full[y0:y1, x0:x1]
+
+        # 흰색 신발 감지
+        _, foot_thresh = cv2.threshold(foot_roi, 200, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(foot_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # 현재 프레임의 신발 좌표들 [(x, y), ...]
+        curr_shoes = []
+        for contour in contours:
+            if cv2.contourArea(contour) > 50:  # 노이즈 제거
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    curr_shoes.append((cX, cY))
+
+        # X축 기준으로 정렬 (필수는 아니지만 매칭에 도움)
+        curr_shoes.sort(key=lambda p: p[0])
+
+        reward = 0.0
+
+        # 신발이 2개 감지되고, 이전 데이터가 있을 때만 로직 수행
+        if len(curr_shoes) == 2 and len(self.prev_shoes_x_positions) == 2:
+            prev_s1_x = self.prev_shoes_x_positions[0]  # 이전 발1 X
+            prev_s2_x = self.prev_shoes_x_positions[1]  # 이전 발2 X
+
+            # [매칭 로직] 어떤 게 발1이고 발2인지 거리 기반 매칭
+            # 현재 감지된 두 발(A, B) 중 이전 발1과 더 가까운 것을 발1로 간주
+            # (QWOP는 발이 순간이동하지 않으므로 유효함)
+
+            curr_s1 = curr_shoes[0]
+            curr_s2 = curr_shoes[1]
+
+            # 거리 계산 (X축만 고려해도 됨)
+            dist_1_A = abs(prev_s1_x - curr_s1[0])
+            dist_1_B = abs(prev_s1_x - curr_s2[0])
+
+            # 매칭 수행
+            if dist_1_A < dist_1_B:
+                # 0번이 발1, 1번이 발2
+                curr_s1_x = curr_s1[0]
+                curr_s2_x = curr_s2[0]
+            else:
+                # 1번이 발1, 0번이 발2 (순서 바뀜)
+                curr_s1_x = curr_s2[0]
+                curr_s2_x = curr_s1[0]
+
+            # [교차 판정]
+            # 두 발의 상대적 위치(부호)가 바뀌었는지 확인
+            # diff = (발1 X - 발2 X)
+            prev_diff = prev_s1_x - prev_s2_x
+            curr_diff = curr_s1_x - curr_s2_x
+
+            # 부호가 다르면 교차한 것 (하나는 +, 하나는 -)
+            # 0인 경우는 거의 없으므로 곱해서 음수면 교차
+            if prev_diff * curr_diff < 0:
+
+                # ⭐️ [핵심] 자세 조건: 상체가 서 있을 때만 보상!
+                # posture_reward가 0~0.1 사이 값이므로, 대략 절반 이상일 때만 인정
+                # (이 값은 디버깅하면서 조정하세요. 0.05는 예시)
+                posture_condition = current_posture_reward > (self.posture_reward_scale * 0.4)
+
+                if posture_condition:
+                    reward = 1.0  # 교차 성공 보상
+                    # self.reward_log.append(f"Cross! Reward: {reward}")
+                    if self.debug_posture:
+                        print(f"!! FEET CROSSED & GOOD POSTURE !! Reward +{reward}")
+                else:
+                    # 교차는 했으나 누워서 한 경우 -> 보상 없음 (또는 아주 조금)
+                    # reward = 0.1
+                    if self.debug_posture:
+                        print("Feet crossed but BAD POSTURE (Crawling). No Reward.")
+
+            # 다음 프레임을 위해 업데이트 (매칭된 순서대로 저장해야 함 중요!)
+            self.prev_shoes_x_positions = [curr_s1_x, curr_s2_x]
+
+        elif len(curr_shoes) == 2:
+            # 최초 초기화
+            self.prev_shoes_x_positions = [curr_shoes[0][0], curr_shoes[1][0]]
+        else:
+            # 신발 놓침 -> 리셋하지 않고 유지하거나 비움 (여기선 유지 추천)
+            pass
+
+        # 디버깅 시각화
+        if self.debug_posture:
+            cv2.imshow("Foot Capture", foot_roi)
+            cv2.waitKey(1)
+
+        return foot_roi, reward
+
     def _capture_frames_raw(self, n: int, force_ocr: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        관측 프레임은 축소본 스택으로,
-        마지막 원본 프레임은 별도로 리턴. (자세 보상 계산용)
-        """
         frames = []
         last_arr_full = None
+
+        # 여기서 먼저 전체 프레임을 캡처해야 자세 보상을 계산할 수 있음
+        raw = self.sct.grab(self.game_obj_location)
+        arr_full = np.asarray(raw)[:, :, 0]
+
+        # 1. 자세 보상 먼저 계산 (발 캡처 함수에 넘겨주기 위해)
+        current_posture_reward = self._calculate_posture_reward(arr_full)
+
         for _ in range(n):
-            raw = self.sct.grab(self.game_obj_location)  # BGRA
-            arr_full = np.asarray(raw)[:, :, 0]  # 원본 1채널(B)
+            raw = self.sct.grab(self.game_obj_location)
+            arr_full = np.asarray(raw)[:, :, 0]
             last_arr_full = arr_full
 
-            # 관측은 축소본으로
-            arr_obs = cv2.resize(
-                arr_full, (0, 0),
-                fx=self.obs_scale, fy=self.obs_scale,
-                interpolation=cv2.INTER_AREA
-            )
+            arr_obs = cv2.resize(arr_full, (0, 0), fx=self.obs_scale, fy=self.obs_scale, interpolation=cv2.INTER_AREA)
             frames.append(arr_obs)
 
-            # OCR → prev_dist 갱신 및 improve 타이머 갱신 (필요시에만)
+            # 2. 발 캡처 시 자세 점수를 인자로 전달 ⭐️
+            foot_roi, foot_reward = self._capture_foot_area(current_posture_reward)
+
+            # 여기서 foot_reward를 어딘가에 저장해뒀다가 step 함수에서 합산해야 함
+            # (간단하게 클래스 변수에 임시 저장하거나 리턴값을 확장)
+            self.current_step_foot_reward = foot_reward  # self에 변수 추가 필요
+
             if force_ocr:
                 dist = self._ocr_distance(arr_full)
+
                 if self.debug_ocr:
-                    print(f"[OCR] distance: {dist} metres")
+                    pass
 
-        # 스택된 프레임과 마지막 원본 프레임을 반환
+                # print(f"[OCR] distance: {dist} metres")
+
         return np.stack(frames, axis=0), last_arr_full
-
     # ====== OCR / Popup / Done ======
     def _try_ocr_once(self, gray_full: np.ndarray) -> float:
         """재시작 확인용 빠른 한 번 읽기(상태 갱신은 하지 않음)."""
@@ -570,7 +702,11 @@ class QWOPEnv:
             cv2.waitKey(1)
 
         # 최종 보상 스케일 적용 (0~1 사이 값 * 스케일)
-        return posture_reward * self.posture_reward_scale
+        return (posture_reward * self.posture_reward_scale) * 2
+
+
+
+
 
     def _roi_popup(self, gray: np.ndarray) -> np.ndarray:
         h, w = gray.shape[:2]

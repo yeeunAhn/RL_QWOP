@@ -34,6 +34,8 @@ class QWOP_QNetwork(nn.Module):
         # 상태 차원: (frame_stack, H, W)
         C, H, W = state_shape
 
+        print(f"DEBUG: Network initialized with Channels(C)={C}")
+
         self.conv = nn.Sequential(
             nn.Conv2d(C, 32, kernel_size=8, stride=4),
             nn.ReLU(),
@@ -118,7 +120,7 @@ class DQNAgent:
         self.LR = kwargs.get('lr', 1e-4)
         self.BATCH_SIZE = kwargs.get('batch_size', 32)
         self.TARGET_UPDATE = kwargs.get('target_update', 1000)  # 타겟 네트워크 업데이트 주기
-        self.EPSILON_START = kwargs.get('eps_start', 0.20)
+        self.EPSILON_START = kwargs.get('eps_start', 1.00)
         self.EPSILON_END = kwargs.get('eps_end', 0.01)
         self.EPSILON_DECAY = kwargs.get('eps_decay', 50000)
         self.REPLAY_CAPACITY = kwargs.get('replay_capacity', 30000)
@@ -136,7 +138,7 @@ class DQNAgent:
         self.current_epsilon = self.EPSILON_START  # 💡 초기화
 
         # 최고 모델 경로 설정
-        self.best_model_path = os.path.join(project_root, "checkpoints", "best_model.pth")
+        self.best_model_path = os.path.join(project_root, "checkpoints/ver3", "best_model.pth")
         self.best_distance = -float("inf")  # 초기 최고 성능은 매우 낮게 설정
 
     def select_action(self, state):
@@ -198,7 +200,7 @@ class DQNAgent:
             self.best_distance = current_distance
             # 파일명에 거리를 포함하여 저장
             best_model_filename = f"best_model_{current_distance:.2f}m.pth"
-            best_model_path = os.path.join(project_root, "checkpoints", best_model_filename)
+            best_model_path = os.path.join(project_root, "checkpoints/ver3", best_model_filename)
 
             torch.save(self.policy_net.state_dict(), best_model_path)
             print(f"✅ 최고 모델 저장 완료: {best_model_path} | Distance: {current_distance:.2f}m")
@@ -315,7 +317,7 @@ class DQNAgent:
 if __name__ == '__main__':
 
     # 체크포인트 디렉토리를 프로젝트 루트 기준으로 설정
-    CHECKPOINT_DIR = os.path.join(project_root, "checkpoints")
+    CHECKPOINT_DIR = os.path.join(project_root, "checkpoints", "ver3")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # QWOP 환경 초기화 (frame_stack = 4 권장)
@@ -345,8 +347,8 @@ if __name__ == '__main__':
     # 💡 [수정] 모델 로드 로직 (이어하기 원할 때 사용)
     # -------------------------------------------------------------------
     LOAD_MODEL = True
-    LOAD_STEP = 300000
-    MODEL_TO_LOAD = "checkpoints/qwop_checkpoint_20251126_121219_steps300000.pth"  # ⭐️ 이어할 파일명
+    LOAD_STEP = 240000
+    MODEL_TO_LOAD = "checkpoints/qwop_checkpoint_20251126_043747_steps240000.pth"  # ⭐️ 이어할 파일명
 
     if LOAD_MODEL and agent.load_model(MODEL_TO_LOAD):
         agent.step_count = LOAD_STEP

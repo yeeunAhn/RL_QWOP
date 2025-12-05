@@ -1,5 +1,3 @@
-# eval_dqn.py  (train_dqn.py랑 같은 폴더, rl/ 안에 두는 기준)
-
 import os
 import sys
 import time
@@ -48,7 +46,7 @@ def evaluate(model_path: str,
              frame_stack: int = 2,
              background_safe: bool = True,
              render_sleep: float = 0.01):
-    """학습된 모델을 여러 에피소드 동안 평가"""
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Device: {device}")
@@ -113,14 +111,14 @@ if __name__ == "__main__":
     MODEL_PATH = os.path.join(
         project_root,
         "checkpoints",
-        "ver3",
-        "best_model_30.10m.pth",   # 네가 말한 그 파일 이름
+        "speed_Ver",
+        "best_model_55.50m_511.0s.pth",
     )
 
     evaluate(
         model_path=MODEL_PATH,
-        num_episodes=10,          # 몇 번 돌려볼지
-        frame_stack=2,           # train_dqn.py에서 쓰던 FRAME_STACK이랑 맞추기
-        background_safe=True,    # 너가 평소 쓰는 옵션
-        render_sleep=0.01,       # 너무 빨리 돌면 0으로 줄여도 됨
+        num_episodes=10,
+        frame_stack=2,
+        background_safe=True,
+        render_sleep=0.01,
     )

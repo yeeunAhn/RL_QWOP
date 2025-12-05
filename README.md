@@ -1,6 +1,5 @@
 # 🏃‍♂️ RL Project : QWOP
 
->
 > Selenium, CDP(Chrome DevTools Protocol), 그리고 강화학습(DDQN)을 활용하여 QWOP 게임의 물리 엔진 허점을 파고드는 AI 에이전트 프로젝트입니다.
 
 ## 📝 Project Overview

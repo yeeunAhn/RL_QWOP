@@ -138,7 +138,7 @@ class DQNAgent:
         self.current_epsilon = self.EPSILON_START  # 💡 초기화
 
         # 최고 모델 경로 설정
-        self.best_model_path = os.path.join(project_root, "checkpoints/ver3", "best_model.pth")
+        self.best_model_path = os.path.join(project_root, "checkpoints/speed_ver", "best_model.pth")
         self.best_distance = -float("inf")  # 초기 최고 성능은 매우 낮게 설정
 
     def select_action(self, state):
@@ -194,17 +194,17 @@ class DQNAgent:
             print(f"--- Step {self.step_count}: 타겟 네트워크 업데이트 ---")
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
-    def save_best_model(self, current_distance):
-        """최고 모델을 저장합니다."""
+    def save_best_model(self, current_distance, time_sec):
+        """최고 모델 저장 (+ 시간 포함)"""
         if current_distance > self.best_distance:
             self.best_distance = current_distance
-            # 파일명에 거리를 포함하여 저장
-            best_model_filename = f"best_model_{current_distance:.2f}m.pth"
-            best_model_path = os.path.join(project_root, "checkpoints/ver3", best_model_filename)
+
+            # 시간도 같이 파일명에 추가
+            best_model_filename = f"best_model_{current_distance:.2f}m_{time_sec:.1f}s.pth"
+            best_model_path = os.path.join(project_root, "checkpoints/speed_ver", best_model_filename)
 
             torch.save(self.policy_net.state_dict(), best_model_path)
-            print(f"✅ 최고 모델 저장 완료: {best_model_path} | Distance: {current_distance:.2f}m")
-
+            print(f"✅ 최고 모델 저장 완료: {best_model_path} | Distance: {current_distance:.2f}m | Time: {time_sec:.1f}s")
 
     # 💡 [수정] train 함수에 자동 저장을 위한 인자 추가
     def train(self, num_episodes, checkpoint_dir, checkpoint_interval=5000):
@@ -283,7 +283,9 @@ class DQNAgent:
                     )
 
                     # 최고 모델 저장
-                    self.save_best_model(dist)
+                    episode_time = time() - episode_start
+                    self.save_best_model(dist, episode_time)
+
                     break
 
         print("DQN 학습 완료.")
@@ -317,7 +319,7 @@ class DQNAgent:
 if __name__ == '__main__':
 
     # 체크포인트 디렉토리를 프로젝트 루트 기준으로 설정
-    CHECKPOINT_DIR = os.path.join(project_root, "checkpoints", "ver3")
+    CHECKPOINT_DIR = os.path.join(project_root, "checkpoints", "speed_ver")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     # QWOP 환경 초기화 (frame_stack = 4 권장)
@@ -339,7 +341,7 @@ if __name__ == '__main__':
         gamma=0.99,  # 할인 계수
         batch_size=32,  # 배치 크기
         target_update=5000,  # 타겟 업데이트 주기 (스텝 기준)
-        eps_decay=120000,  # Epsilon 감소 속도 (더 느리게)
+        eps_decay=80000,  # Epsilon 감소 속도 (더 느리게)
         replay_capacity=30000,  # 리플레이 버퍼 크기
         min_replay_size=2000  # 최소 학습 시작 크기
     )
@@ -347,8 +349,8 @@ if __name__ == '__main__':
     # 💡 [수정] 모델 로드 로직 (이어하기 원할 때 사용)
     # -------------------------------------------------------------------
     LOAD_MODEL = True
-    LOAD_STEP = 240000
-    MODEL_TO_LOAD = "checkpoints/qwop_checkpoint_20251126_043747_steps240000.pth"  # ⭐️ 이어할 파일명
+    LOAD_STEP = 144400
+    MODEL_TO_LOAD = "checkpoints/speed_ver//best_model_12.60m_81.9s.pth"  # ⭐️ 이어할 파일명
 
     if LOAD_MODEL and agent.load_model(MODEL_TO_LOAD):
         agent.step_count = LOAD_STEP

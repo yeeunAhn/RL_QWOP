@@ -26,12 +26,12 @@ ACTIONS = {
     2: ['w'],
     3: ['o'],
     4: ['p'],
-    #5: ['q', 'w'],
+    5: ['q', 'w'],
     6: ['q', 'o'],
     7: ['q', 'p'],
     8: ['w', 'o'],
     9: ['w', 'p'],
-    #10: ['o', 'p'],
+    10: ['o', 'p'],
     # 11: ['q','w','o'],
     # 12: ['q','w','p'],
     # 13: ['q','o','p'],
@@ -117,11 +117,11 @@ class QWOPEnv:
         self._dist_before = np.nan
         self.last_improve_time = time()
         self.episode_start_time = time()
-        self.idle_done_sec = 30.0 #수정예정
+        self.idle_done_sec = 300.0 #수정예정
         self.step_timeout_sec = 100.0
         self.baseline_bright = 0.10
         self.nan_streak = 0
-        self.nan_done_streak = 50000000000  # 연속 5회 NaN이면 done (의도적으로 매우 큼)
+        self.nan_done_streak = 5  # 연속 5회 NaN이면 done (의도적으로 매우 큼)
 
 
 
@@ -130,6 +130,9 @@ class QWOPEnv:
         self.dt = 1.0 / 30.0  # 스텝 주기(30Hz)
         self.ocr_stride = 6  # 매 6스텝마다 한 번만 OCR
         self.step_i = 0
+
+        self.last_speed_dist = 0.0
+        self.last_speed_time = time()
 
         # 관측 사이즈 축소(scale)
         self.obs_scale = 0.15 # 관측 프레임 축소 비율(0.25 = 1/4)
@@ -175,6 +178,10 @@ class QWOPEnv:
         # ⭐️ [추가] 이번 에피소드의 최고 도달 거리 (0부터 시작)
         self.max_dist_episode = 0.0
 
+        # 속도 보상용
+        self.last_speed_dist = 0.0
+        self.last_speed_time = time()
+
         return obs
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
@@ -209,7 +216,8 @@ class QWOPEnv:
 
         # 3. 보상 합산
         LIVING_PENALTY = 0.02
-        reward = posture_reward + crossing_reward - LIVING_PENALTY
+        # reward = posture_reward + crossing_reward - LIVING_PENALTY
+        reward = posture_reward  - LIVING_PENALTY
 
 
         # 3. [추가] 최고 기록 갱신 보상 (Max Distance Reward)
@@ -239,10 +247,30 @@ class QWOPEnv:
 
         self._dist_before = curr_dist
 
+        # --- 🔥 속도 기반 보상: Δ거리 / Δ시간 ---
+        speed_reward = 0.0
+        if not np.isnan(curr_dist):
+            now_t = time()
+
+            # 이전에 기록된 거리보다 앞으로 나갔을 때만 속도 계산
+            if curr_dist > self.last_speed_dist:
+                dt_speed = max(now_t - self.last_speed_time, 1e-3)  # 0으로 나누기 방지
+                dv = curr_dist - self.last_speed_dist
+                speed = dv / dt_speed  # m/s 단위 비슷하게
+
+                SPEED_SCALE = 0.5  # 🔧 튜닝 포인트: 너무 크면 이것만 먹음
+                speed_reward = speed * SPEED_SCALE
+                reward += speed_reward
+
+                # 기준 업데이트
+                self.last_speed_dist = curr_dist
+                self.last_speed_time = now_t
+
+
         # ==========================================================
 
         # 1. done 판정
-        sleep(0.3)
+        # sleep(0.3)
         done = self._nan_done(curr_dist) or self._done_check(last_full_frame)
         final_dist_for_info = curr_dist
 
@@ -252,9 +280,7 @@ class QWOPEnv:
 
         # 2. 동적 제한 시간 계산
         # 기본 20초 + (현재 거리 * 15초)
-        # 예: 0m -> 20초 제한
-        # 예: 2m -> 20 + 30 = 50초 제한
-        # 예: 10m -> 20 + 150 = 170초 제한
+
         current_dist_val = curr_dist if not np.isnan(curr_dist) else 0.0
         dynamic_time_limit = 2000.0 + (max(0, current_dist_val) * 15.0) #수정예정
 
@@ -411,6 +437,10 @@ class QWOPEnv:
         self.last_improve_time = time()
         self.episode_start_time = time()
         self.nan_streak = 0
+
+        # 속도 보상용도 같이 리셋
+        self.last_speed_dist = 0.0
+        self.last_speed_time = time()
 
     def _nan_done(self, dist: float) -> bool:
         if np.isnan(dist):
@@ -628,8 +658,8 @@ class QWOPEnv:
             if best_val > prev + 1e-4:
                 self.last_improve_time = time()
             # 한 프레임 급점프는 노이즈로 처리
-            if abs(best_val - prev) > 1.0:
-                return float("nan")
+            # if abs(best_val - prev) > 1.0:
+            #     return float("nan")
 
         self.prev_dist = best_val
         return best_val

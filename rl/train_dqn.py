@@ -9,11 +9,8 @@ import random
 from time import time
 import time as time_module
 
-# 현재 스크립트 파일(train_dqn.py)이 있는 디렉토리(rl/)의 절대 경로를 가져옵니다.
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# 부모 디렉토리(프로젝트 루트, RL_QWOP/)의 절대 경로를 가져옵니다.
 project_root = os.path.dirname(script_dir)
-# 파이썬이 모듈을 찾을 수 있도록 프로젝트 루트 경로를 시스템 경로에 추가합니다.
 sys.path.append(project_root)
 
 # 💡 envs 폴더에 있는 qwop_env를 임포트합니다.

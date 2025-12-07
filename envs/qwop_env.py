@@ -1,5 +1,3 @@
-# QWOP Original Environment (Selenium + OCR) — CDP 키입력(동시 누름 지원)
-# gym과 분리된 native env
 
 from typing import Union, Tuple, Dict, Any, List
 import os, re, random

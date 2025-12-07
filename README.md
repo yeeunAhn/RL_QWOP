@@ -31,8 +31,6 @@ Random Agent와 제안된 DQN 모델의 성능 비교 결과입니다.
 |:-----------------|:------------:| :---: | :--- |
 | **Random Agent** |    3.20 m    | 0.6 m | 제자리에서 붕괴 |
 | **Trained DDQN** | **55.50 m**  | **13.1 m** | **Knee Scooting (무릎 주행)** |
-![Episode-wise Distance](capture/Screenshot from 2025-12-07 14-18-42.png)
-
 > *학습된 에이전트는 무작위 행동 대비 **약 20배 이상의 주행 성능**을 보였으며, 안정적인 무릎 주행 패턴을 확립했습니다.*
 
 ## 🛠 Prerequisites & Installation
